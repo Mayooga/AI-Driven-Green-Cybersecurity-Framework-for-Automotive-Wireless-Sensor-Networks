@@ -129,12 +129,3 @@ streamlit run dashboard.py
 
 The gateway reads receiver records, computes features, predicts a class, and updates `latest_prediction.json`. The dashboard reads that file and displays the latest class, confidence, packet count, and telemetry. Stop either process with **Ctrl+C**. `latest_prediction.json` is generated while running and is intentionally excluded from Git.
 
-## What to commit to GitHub
-
-Commit the source code, `README.md`, `data/` recordings you are allowed to share, the `secrets.example.h` templates, and the trained model/result files if you want the dashboard to run immediately after cloning. Do not commit any `secrets.h` files. The `.gitignore` excludes local secrets, Python cache/virtual environments, logs, and the live prediction JSON.
-
-If a clone does not include model artifacts, regenerate them by running `clean_data.py` and `train_model.py` after placing the recordings in `data/`.
-=======
-# AI-Driven-Green-Cybersecurity-Framework-for-Automotive-Wireless-Sensor-Networks
-Wireless sensor networks in modern vehicles monitor critical functions like tire pressure and collision detection but face cybersecurity threats and battery limitations. This project develops a simple AI-driven green cybersecurity framework using lightweight machine learning for threat detection and energy-efficient routing protocols.
->>>>>>> 364925a32d6dfc81f4938a9d9de75d712e8aa02b
