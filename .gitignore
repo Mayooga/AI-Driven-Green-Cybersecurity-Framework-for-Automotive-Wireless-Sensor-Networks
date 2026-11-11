@@ -4,6 +4,11 @@ __pycache__/
 .venv/
 venv/
 
+# Editor and operating-system files
+.DS_Store
+.vscode/
+.idea/
+
 # Local secrets and device-specific settings
 **/secrets.h
 secrets.local.h
@@ -18,3 +23,9 @@ latest_prediction.json
 # Trained model artifacts 
 model.joblib
 label_encoder.joblib
+
+# Generated plots
+*.png
+
+#genersted combined csv file
+combined_clean.csv

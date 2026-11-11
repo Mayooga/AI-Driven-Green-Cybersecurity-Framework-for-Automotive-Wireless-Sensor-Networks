@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # ESP32 IoT Intrusion Detection System
 
 This project sends sensor readings between two ESP32 boards using ESP-NOW. A receiver ESP32 decrypts the packets and sends a serial record to a computer. Python scripts collect labeled recordings, prepare features, train and evaluate a Random Forest classifier, and display live predictions in a Streamlit dashboard.
