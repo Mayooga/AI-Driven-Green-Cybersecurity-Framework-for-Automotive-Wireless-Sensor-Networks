@@ -1,0 +1,2 @@
+# AI-Driven-Green-Cybersecurity-Framework-for-Automotive-Wireless-Sensor-Networks
+Wireless sensor networks in modern vehicles monitor critical functions like tire pressure and collision detection but face cybersecurity threats and battery limitations. This project develops a simple AI-driven green cybersecurity framework using lightweight machine learning for threat detection and energy-efficient routing protocols.
