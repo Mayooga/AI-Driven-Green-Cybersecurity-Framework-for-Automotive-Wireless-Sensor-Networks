@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ESP32 IoT Intrusion Detection System
 
 This project sends sensor readings between two ESP32 boards using ESP-NOW. A receiver ESP32 decrypts the packets and sends a serial record to a computer. Python scripts collect labeled recordings, prepare features, train and evaluate a Random Forest classifier, and display live predictions in a Streamlit dashboard.
@@ -133,3 +134,7 @@ The gateway reads receiver records, computes features, predicts a class, and upd
 Commit the source code, `README.md`, `data/` recordings you are allowed to share, the `secrets.example.h` templates, and the trained model/result files if you want the dashboard to run immediately after cloning. Do not commit any `secrets.h` files. The `.gitignore` excludes local secrets, Python cache/virtual environments, logs, and the live prediction JSON.
 
 If a clone does not include model artifacts, regenerate them by running `clean_data.py` and `train_model.py` after placing the recordings in `data/`.
+=======
+# AI-Driven-Green-Cybersecurity-Framework-for-Automotive-Wireless-Sensor-Networks
+Wireless sensor networks in modern vehicles monitor critical functions like tire pressure and collision detection but face cybersecurity threats and battery limitations. This project develops a simple AI-driven green cybersecurity framework using lightweight machine learning for threat detection and energy-efficient routing protocols.
+>>>>>>> 364925a32d6dfc81f4938a9d9de75d712e8aa02b
