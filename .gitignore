@@ -20,10 +20,6 @@ latest_prediction.json
 # Local logs
 *.log
 
-# Trained model artifacts 
-model.joblib
-label_encoder.joblib
-
 # Generated plots
 *.png
 

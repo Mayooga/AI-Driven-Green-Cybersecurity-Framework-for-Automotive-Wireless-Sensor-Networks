@@ -5,7 +5,7 @@ Step 1 of the pipeline:
 - Sanitize timestamps and packet_size (strip serial noise, coerce to numeric)
 - Detect rejected packets from either the receiver's auth_ok field or legacy
   DECRYPT_FAIL text, and mark their sensor value missing.
-- Derive replay labels from the receiver's replay flag when it is available.
+- Assign target labels from capture filenames, not from receiver decisions.
 - Compute causal time-series features per capture session, without using the
   target label to define feature windows.
 - Save combined, clean data (with NaNs left in place for missing/failed
@@ -34,8 +34,9 @@ DATA_DIR = BASE_DIR / "data"
 def parse_filename(filepath: Path):
     """
     Parse one capture file using <class>_run<number>.csv.
-    Keep the whole stem as the session ID, so normal_run1 and flood_run1
-    remain separate held-out capture sessions.
+    The returned class is always canonical (normal/flood/replay/tamper),
+    while the full stem remains the session ID. Thus normal_run1 and
+    normal_run2 share a class but remain separate capture sessions.
 
     Also accept the one legacy replay_<timestamp>.csv file currently in data/.
     """
@@ -87,16 +88,22 @@ def load_and_sanitize(filepath: Path):
     if "packet_size" not in df:
         df["packet_size"] = 0
 
-    # Standardize label & session columns (filename is treated as ground
-    # truth for which experiment this file belongs to).
+    # The filename identifies the capture class. Normalize any labels already
+    # written by the capture script (e.g. flooding1, replay6, tamper3) to the
+    # canonical class name used by the model. Keep the raw value for auditing.
+    if "label" in df.columns:
+        df["source_label"] = df["label"].astype(str).str.strip()
+        source_labels = sorted(set(df["source_label"].dropna()))
+        if source_labels and source_labels != [label]:
+            print(
+                f"[{filepath.name}] normalized source labels {source_labels} "
+                f"to class '{label}' from filename"
+            )
     df["label"] = label
     df["session"] = session
-    # In a replay capture, normal packets before the attack remain normal;
-    # only rows the receiver explicitly rejects as replays receive that label.
-    # Legacy replay captures without this column keep their filename label.
-    if "replay" in df.columns and label == "replay":
-        replay_flag = pd.to_numeric(df["replay"], errors="coerce").fillna(0).astype(int)
-        df["label"] = np.where(replay_flag == 1, "replay", "normal")
+    # Keep the receiver's replay column as audit data, but never use its
+    # decision as the target label. That would make evaluation measure how
+    # well the model copies the receiver's own anti-replay decision.
 
     # --- Clean timestamp (strip UART noise, drop unparsable rows) ---
     df["timestamp"] = df["timestamp"].apply(extract_digits)
@@ -155,10 +162,11 @@ def engineer_features_per_session(df: pd.DataFrame) -> pd.DataFrame:
     for session, g in df.groupby("session", sort=False):
         g = g.sort_values("timestamp").copy().reset_index(drop=True)
 
-        # 1. Inter-packet arrival time (ms) & timing variance
+        # 1. Inter-packet arrival time (ms) & timing variance. The first gap
+        # is unknown at inference time, so use zero instead of a whole-session
+        # median that would look ahead into later packets.
         g["inter_packet_ms"] = g["timestamp"].diff()
-        median_gap = g["inter_packet_ms"].median()
-        g["inter_packet_ms"] = g["inter_packet_ms"].fillna(median_gap if pd.notna(median_gap) else 0)
+        g["inter_packet_ms"] = g["inter_packet_ms"].fillna(0)
 
         # Rolling standard deviation of inter-packet arrival time (5-packet window)
         g["inter_packet_std_5"] = g["inter_packet_ms"].rolling(window=5, min_periods=1).std().fillna(0)
@@ -232,6 +240,8 @@ def main():
 
     print("\n--- Columns Saved ---")
     print(list(clean_df.columns))
+    print("\n--- Canonical class labels ---")
+    print(sorted(clean_df["label"].dropna().unique().tolist()))
 
 
 if __name__ == "__main__":
