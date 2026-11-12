@@ -159,6 +159,11 @@ void loop() {
 
   txDone = false;
   esp_now_send(receiverMac, packet, sizeof(packet));
+  if (statPackets == 5) {   // print once, a few cycles in
+    Serial.print("CAPTURED: ");
+    for (int i = 0; i < sizeof(packet); i++) Serial.printf("%02X", packet[i]);
+    Serial.println();
+  }
   uint32_t w = millis();
   while (!txDone && millis() - w < 50) delay(1);
 

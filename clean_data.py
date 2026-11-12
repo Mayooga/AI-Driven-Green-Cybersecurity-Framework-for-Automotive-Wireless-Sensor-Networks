@@ -39,6 +39,12 @@ def parse_filename(filepath: Path):
         flood_data.csv  -> label='flood', session='session1'
     """
     stem = filepath.stem.lower()
+    # Current captures use names such as replay_1794421908.csv or
+    # normal5_1794418865.csv. Keep each file as an independent session.
+    for prefix in ("normal", "replay", "flood", "flooding", "tamper"):
+        if stem.startswith(prefix):
+            label = "flood" if prefix == "flooding" else prefix
+            return label, stem
     if "_run" in stem:
         parts = stem.split("_run")
         label = parts[0]
@@ -72,10 +78,26 @@ def load_and_sanitize(filepath: Path):
     label, session = parse_filename(filepath)
     df = pd.read_csv(filepath)
 
+    # Receiver firmware's current schema differs from the older timestamp,
+    # packet_size, value schema. Map its telemetry columns into the common
+    # feature pipeline without discarding the receiver's sequence/replay flag.
+    aliases = {"t_ms": "timestamp", "len": "packet_size", "current": "value"}
+    df = df.rename(columns={k: v for k, v in aliases.items() if k in df.columns})
+    if "timestamp" not in df or "value" not in df:
+        raise ValueError(f"{filepath}: expected timestamp/value or t_ms/current columns")
+    if "packet_size" not in df:
+        df["packet_size"] = 0
+
     # Standardize label & session columns (filename is treated as ground
     # truth for which experiment this file belongs to).
     df["label"] = label
     df["session"] = session
+    # A replay flag is emitted only after the receiver successfully
+    # authenticates a packet and finds a duplicate/old sequence number.
+    # Use it as the event label in mixed replay recordings.
+    if "replay" in df.columns and label == "replay":
+        replay_flag = pd.to_numeric(df["replay"], errors="coerce").fillna(0).astype(int)
+        df["label"] = np.where(replay_flag == 1, "replay", "normal")
 
     # --- Clean timestamp (strip UART noise, drop unparsable rows) ---
     df["timestamp"] = df["timestamp"].apply(extract_digits)
@@ -150,18 +172,11 @@ def engineer_features_per_session(df: pd.DataFrame) -> pd.DataFrame:
         g.loc[g["is_decrypt_fail"] == 1, "is_repeat_value"] = 0
         g["repeat_rate_5"] = g["is_repeat_value"].rolling(window=5, min_periods=1).mean()
 
-        # 4. FIX GROUND-TRUTH LABEL NOISE FOR REPLAY SESSIONS:
-        # In replay capture files, fresh interleaved packets (is_repeat_value == 0)
-        # are genuine normal transmissions. Only actual repeated packets (is_repeat_value == 1)
-        # or active repetition windows are true replay attack packets.
-        if label == "replay":
-            g.loc[g["is_repeat_value"] == 0, "label"] = "normal"
-
-        # 5. Interaction Feature: Combined Repetition + Timing Disruption
+        # 4. Interaction Feature: Combined Repetition + Timing Disruption
         # Distinguishes natural steady readings from injected replay packets
         g["replay_timing_sig"] = g["repeat_rate_5"] * (1.0 + np.log1p(g["inter_packet_std_5"]))
 
-        # 6. Local Z-Score deviation over rolling 10-packet window
+        # 5. Local Z-Score deviation over rolling 10-packet window
         roll_mean = g["value"].rolling(window=10, min_periods=1).mean()
         roll_std = g["value"].rolling(window=10, min_periods=1).std().replace(0, np.nan)
         g["value_zscore"] = ((g["value"] - roll_mean) / roll_std).fillna(0)
@@ -175,6 +190,12 @@ def main():
     print("=== Cleaning Hardware Telemetry Data (Leakage-Free Multi-Session Pipeline) ===")
 
     csv_files = sorted(list(DATA_DIR.glob("*.csv")))
+    # Include root-level captures created by capture.py as well as the
+    # documented data/ directory.
+    csv_files.extend(sorted(
+        p for p in BASE_DIR.glob("*.csv")
+        if p.parent == BASE_DIR and p.name.lower().startswith(("normal", "replay", "flood", "tamper"))
+    ))
     if not csv_files:
         print(f"Error: No CSV files found in {DATA_DIR}")
         return
