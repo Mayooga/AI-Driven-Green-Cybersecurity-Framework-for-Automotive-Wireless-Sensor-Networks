@@ -3,14 +3,14 @@ clean_data.py
 Step 1 of the pipeline:
 - Load all raw hardware-captured CSVs (normal_run1.csv, flood_run1.csv, etc.)
 - Sanitize timestamps and packet_size (strip serial noise, coerce to numeric)
-- Detect decrypt failures from the ACTUAL captured value field, for every
-  file, not just files labeled "tamper" -- this avoids manufacturing a
-  trivially-learnable constant feature for one class.
-- Compute causal time-series features STRICTLY PER-SESSION to eliminate
-  cross-session data leakage.
+- Detect rejected packets from either the receiver's auth_ok field or legacy
+  DECRYPT_FAIL text, and mark their sensor value missing.
+- Derive replay labels from the receiver's replay flag when it is available.
+- Compute causal time-series features per capture session, without using the
+  target label to define feature windows.
 - Save combined, clean data (with NaNs left in place for missing/failed
   readings -- imputation happens later, per LOSO fold, in train_model.py)
-  ready for Leave-One-Session-Out Cross Validation (LOSO-CV).
+  ready for grouped Leave-One-Session-Out Cross Validation (LOSO-CV).
 
 Usage:
     python clean_data.py
@@ -26,36 +26,34 @@ import numpy as np
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Look in a "data/" subfolder if it exists, otherwise fall back to the
-# script's own folder (this is where your CSVs currently sit).
-DATA_DIR = BASE_DIR / "data" if (BASE_DIR / "data").exists() else BASE_DIR
+# Raw runs belong in data/ and use names such as normal_run1.csv,
+# flood_run1.csv, replay_run1.csv, and tamper_run1.csv.
+DATA_DIR = BASE_DIR / "data"
 
 
 def parse_filename(filepath: Path):
     """
-    Extract label and session from filename.
-    Examples:
-        normal_run1.csv -> label='normal', session='run1'
-        flood_data.csv  -> label='flood', session='session1'
+    Parse one capture file using <class>_run<number>.csv.
+    Keep the whole stem as the session ID, so normal_run1 and flood_run1
+    remain separate held-out capture sessions.
+
+    Also accept the one legacy replay_<timestamp>.csv file currently in data/.
     """
     stem = filepath.stem.lower()
-    # Current captures use names such as replay_1794421908.csv or
-    # normal5_1794418865.csv. Keep each file as an independent session.
-    for prefix in ("normal", "replay", "flood", "flooding", "tamper"):
-        if stem.startswith(prefix):
-            label = "flood" if prefix == "flooding" else prefix
-            return label, stem
-    if "_run" in stem:
-        parts = stem.split("_run")
-        label = parts[0]
-        session = f"run{parts[1]}"
-    elif "_data" in stem:
-        label = stem.replace("_data", "")
-        session = "session1"
-    else:
-        label = stem
-        session = "session1"
-    return label, session
+    match = re.fullmatch(r"(normal|flood|flooding|replay|tamper)_run(\d+)", stem)
+    if match:
+        label = match.group(1)
+        if label == "flooding":
+            label = "flood"
+        return label, stem
+
+    # Preserve the older replay capture until it is replaced by replay_runN.
+    if re.fullmatch(r"replay_\d+", stem):
+        return "replay", stem
+
+    raise ValueError(
+        f"{filepath.name}: expected <normal|flood|replay|tamper>_run<number>.csv"
+    )
 
 
 def extract_digits(val):
@@ -77,6 +75,7 @@ def load_and_sanitize(filepath: Path):
     """
     label, session = parse_filename(filepath)
     df = pd.read_csv(filepath)
+    df.columns = df.columns.astype(str).str.strip()
 
     # Receiver firmware's current schema differs from the older timestamp,
     # packet_size, value schema. Map its telemetry columns into the common
@@ -92,9 +91,9 @@ def load_and_sanitize(filepath: Path):
     # truth for which experiment this file belongs to).
     df["label"] = label
     df["session"] = session
-    # A replay flag is emitted only after the receiver successfully
-    # authenticates a packet and finds a duplicate/old sequence number.
-    # Use it as the event label in mixed replay recordings.
+    # In a replay capture, normal packets before the attack remain normal;
+    # only rows the receiver explicitly rejects as replays receive that label.
+    # Legacy replay captures without this column keep their filename label.
     if "replay" in df.columns and label == "replay":
         replay_flag = pd.to_numeric(df["replay"], errors="coerce").fillna(0).astype(int)
         df["label"] = np.where(replay_flag == 1, "replay", "normal")
@@ -119,9 +118,15 @@ def load_and_sanitize(filepath: Path):
     else:
         df["packet_size"] = np.nan
 
-    # --- Decrypt-failure detection from the real value field, for every file ---
-    is_fail_str = df["value"].astype(str).str.contains("DECRYPT_FAIL", case=False, na=False)
-    df["is_decrypt_fail"] = is_fail_str.astype(int)
+    # Current receiver rows carry auth_ok=0 and a numeric zero sensor value
+    # on failed authentication. Legacy rows may instead contain DECRYPT_FAIL.
+    is_fail_text = df["value"].astype(str).str.contains("DECRYPT_FAIL", case=False, na=False)
+    if "auth_ok" in df.columns:
+        auth_ok = pd.to_numeric(df["auth_ok"], errors="coerce")
+        is_auth_failure = auth_ok.eq(0)
+    else:
+        is_auth_failure = pd.Series(False, index=df.index)
+    df["is_decrypt_fail"] = (is_fail_text | is_auth_failure).astype(int)
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     # NaNs that appear here are either genuine DECRYPT_FAIL rows, or
     # leftover parse noise. Track them separately so we can report both.
@@ -141,13 +146,13 @@ def load_and_sanitize(filepath: Path):
 
 def engineer_features_per_session(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute time-series rolling features STRICTLY PER (label, session) GROUP.
-    This guarantees zero data leakage across different recording sessions.
-    Includes inter-packet timing variance and replay timing interaction.
+    Compute causal time-series features per capture session. Grouping by the
+    target label would make feature windows depend on ground-truth labels and
+    would reset them at the normal-to-attack transition in mixed captures.
     """
     processed_sessions = []
 
-    for (label, session), g in df.groupby(["label", "session"], sort=False):
+    for session, g in df.groupby("session", sort=False):
         g = g.sort_values("timestamp").copy().reset_index(drop=True)
 
         # 1. Inter-packet arrival time (ms) & timing variance
@@ -159,12 +164,13 @@ def engineer_features_per_session(df: pd.DataFrame) -> pd.DataFrame:
         g["inter_packet_std_5"] = g["inter_packet_ms"].rolling(window=5, min_periods=1).std().fillna(0)
 
         # 2. Packet rate (packets in last 1000ms window)
-        times = g["timestamp"].values
-        rate = []
-        for i, t in enumerate(times):
-            window_start = t - 1000
-            count = np.sum((times[: i + 1] >= window_start) & (times[: i + 1] <= t))
-            rate.append(count)
+        times = g["timestamp"].to_numpy()
+        rate = np.empty(len(times), dtype=np.int32)
+        left = 0
+        for right, t in enumerate(times):
+            while left <= right and times[left] < t - 1000:
+                left += 1
+            rate[right] = right - left + 1
         g["packets_per_sec"] = rate
 
         # 3. Payload repetition features (Replay signature)
@@ -183,19 +189,17 @@ def engineer_features_per_session(df: pd.DataFrame) -> pd.DataFrame:
 
         processed_sessions.append(g)
 
+    if not processed_sessions:
+        return df.iloc[0:0].copy()
     return pd.concat(processed_sessions, ignore_index=True)
 
 
 def main():
-    print("=== Cleaning Hardware Telemetry Data (Leakage-Free Multi-Session Pipeline) ===")
+    print("=== Cleaning Hardware Telemetry Data from data/ ===")
 
-    csv_files = sorted(list(DATA_DIR.glob("*.csv")))
-    # Include root-level captures created by capture.py as well as the
-    # documented data/ directory.
-    csv_files.extend(sorted(
-        p for p in BASE_DIR.glob("*.csv")
-        if p.parent == BASE_DIR and p.name.lower().startswith(("normal", "replay", "flood", "tamper"))
-    ))
+    if not DATA_DIR.exists():
+        raise FileNotFoundError(f"Create the raw capture folder first: {DATA_DIR}")
+    csv_files = sorted(DATA_DIR.glob("*.csv"))
     if not csv_files:
         print(f"Error: No CSV files found in {DATA_DIR}")
         return

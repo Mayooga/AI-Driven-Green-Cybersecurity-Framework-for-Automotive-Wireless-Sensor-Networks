@@ -2,10 +2,11 @@
 train_model.py
 Step 2 of the pipeline:
 - Load combined_clean.csv
-- Perform Leave-One-Session-Out Cross Validation (LOSO-CV) across all hardware runs (run1, run2, run3)
+- Perform grouped Leave-One-Session-Out Cross Validation (LOSO-CV), holding
+  out one complete capture file per fold to avoid packet-level leakage
 - Impute any missing values (decrypt-fail rows) using TRAIN-FOLD-ONLY
   statistics, so no information about the held-out session leaks in
-- Benchmark Random Forest against Logistic Regression baseline
+- Train and evaluate a Random Forest multiclass attack classifier
 - Measure inference latency per sample
 - Save final trained model (model.joblib), encoder, confusion matrix, and feature importances
 
@@ -19,9 +20,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score
 import joblib
 
@@ -48,7 +48,7 @@ def impute_train_only(X_train: pd.DataFrame, X_test: pd.DataFrame):
     version filled a global median in clean_data.py, which technically
     leaked test-fold information into the "leakage-free" pipeline.
     """
-    train_medians = X_train.median(numeric_only=True)
+    train_medians = X_train.median(numeric_only=True).fillna(0)
     X_train_filled = X_train.fillna(train_medians)
     X_test_filled = X_test.fillna(train_medians)
     return X_train_filled, X_test_filled
@@ -56,27 +56,36 @@ def impute_train_only(X_train: pd.DataFrame, X_test: pd.DataFrame):
 
 def run_loso_cross_validation(df: pd.DataFrame, le: LabelEncoder):
     """
-    Perform Leave-One-Session-Out Cross Validation (LOSO-CV).
-    Each session (run1, run2, run3) is held out once as the test set.
+    Hold out each complete capture session once. Rows from one capture are
+    highly correlated, so packet-level Leave-One-Out would leak nearly
+    identical observations between train and test.
     """
-    unique_sessions = sorted(df["session"].unique())
+    groups = df["session"].astype(str)
+    unique_sessions = sorted(groups.unique())
+    if len(unique_sessions) < 2:
+        raise ValueError("LOSO-CV needs at least two independent capture sessions.")
+
+    session_support = df.groupby("label")["session"].nunique()
     print(f"\n=======================================================")
-    print(f" LEAVE-ONE-SESSION-OUT CROSS-VALIDATION (LOSO-CV)")
+    print(f" GROUPED LEAVE-ONE-SESSION-OUT CROSS-VALIDATION (LOSO-CV)")
     print(f" Unique sessions detected: {unique_sessions}")
-    if len(unique_sessions) < 4:
-        print(f" NOTE: only {len(unique_sessions)} sessions -> report this as a")
-        print(f" limitation in the paper (small-N LOSO).")
+    print(" Sessions per class:")
+    for label, count in session_support.items():
+        print(f"   {label}: {count}")
+        if count < 2:
+            print(f"   WARNING: {label} appears in only one session; held-out-session generalization for this class cannot be measured.")
     print(f"=======================================================\n")
 
     rf_f1_scores = []
-    lr_f1_scores = []
-
     all_y_true = []
     all_y_pred_rf = []
+    all_class_ids = np.arange(len(le.classes_))
 
-    for fold_idx, test_session in enumerate(unique_sessions, 1):
-        train_df = df[df["session"] != test_session]
-        test_df = df[df["session"] == test_session]
+    logo = LeaveOneGroupOut()
+    for fold_idx, (train_idx, test_idx) in enumerate(logo.split(df, groups=groups), 1):
+        train_df = df.iloc[train_idx]
+        test_df = df.iloc[test_idx]
+        test_session = unique_sessions[fold_idx - 1]
 
         X_train_raw = train_df[FEATURES]
         y_train = le.transform(train_df["label"])
@@ -93,41 +102,35 @@ def run_loso_cross_validation(df: pd.DataFrame, le: LabelEncoder):
         )
         clf_rf.fit(X_train, y_train)
         pred_rf = clf_rf.predict(X_test)
-        macro_f1_rf = f1_score(y_test, pred_rf, average="macro")
-        rf_f1_scores.append(macro_f1_rf)
-
-        # 2. Logistic Regression Baseline Model
-        clf_lr = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)
+        macro_f1_rf = f1_score(
+            y_test, pred_rf, labels=all_class_ids, average="macro", zero_division=0
         )
-        clf_lr.fit(X_train, y_train)
-        pred_lr = clf_lr.predict(X_test)
-        macro_f1_lr = f1_score(y_test, pred_lr, average="macro")
-        lr_f1_scores.append(macro_f1_lr)
+        rf_f1_scores.append(macro_f1_rf)
 
         print(f"--- Fold {fold_idx} (Held-out Test Session: {test_session}) ---")
         print(f"  Train samples: {len(train_df)} | Test samples: {len(test_df)}")
         print(f"  Random Forest Macro-F1     : {macro_f1_rf:.4f}")
-        print(f"  Logistic Regression Macro-F1: {macro_f1_lr:.4f}\n")
+        absent_train = sorted(set(le.classes_) - set(train_df["label"].unique()))
+        if absent_train:
+            print(f"  WARNING: training fold has no examples of {absent_train}; these classes cannot be predicted in this fold.")
+        print()
 
         all_y_true.extend(y_test)
         all_y_pred_rf.extend(pred_rf)
 
     mean_rf = np.mean(rf_f1_scores)
     std_rf = np.std(rf_f1_scores)
-    mean_lr = np.mean(lr_f1_scores)
-    std_lr = np.std(lr_f1_scores)
 
     print("=======================================================")
-    print(" LOSO-CV BENCHMARK SUMMARY FOR PAPER")
+    print(" RANDOM FOREST LOSO-CV SUMMARY")
     print("=======================================================")
-    print(f" Random Forest Overall Macro-F1     : {mean_rf:.4f} \u00b1 {std_rf:.4f}")
-    print(f" Logistic Regression Overall Macro-F1: {mean_lr:.4f} \u00b1 {std_lr:.4f}")
-    print(f" RF Improvement over Baseline       : +{(mean_rf - mean_lr)*100:.2f}%\n")
+    print(f" Mean session Macro-F1: {mean_rf:.4f} \u00b1 {std_rf:.4f}\n")
 
     print("=== Aggregated Classification Report (Random Forest) ===")
-    print(classification_report(all_y_true, all_y_pred_rf, target_names=le.classes_))
+    print(classification_report(
+        all_y_true, all_y_pred_rf, labels=all_class_ids,
+        target_names=le.classes_, zero_division=0
+    ))
 
     return all_y_true, all_y_pred_rf
 
@@ -161,17 +164,14 @@ def main():
     df["label_encoded"] = le.fit_transform(df["label"])
     y = df["label_encoded"]
 
-    if df["session"].nunique() > 1:
-        all_y_true, all_y_pred_rf = run_loso_cross_validation(df, le)
-    else:
-        print("Single session detected. Running standard 75/25 split.")
-        all_y_true, all_y_pred_rf = None, None
+    all_y_true, all_y_pred_rf = run_loso_cross_validation(df, le)
 
     # Train final Random Forest on ALL sessions (for deployment).
     # Impute with the full-dataset median here -- this is fine because
     # this final model is not being evaluated on held-out data, it's the
     # artifact you ship.
-    X_full = df[FEATURES].fillna(df[FEATURES].median(numeric_only=True))
+    full_medians = df[FEATURES].median(numeric_only=True).fillna(0)
+    X_full = df[FEATURES].fillna(full_medians)
 
     print("Training final Random Forest model on all sessions...")
     clf_final = RandomForestClassifier(
@@ -184,14 +184,12 @@ def main():
     print(f" Single Prediction Latency: {latency_us:.2f} \u00b5s ({latency_ms:.4f} ms)")
     print(f" Max Throughput Potential : {int(1000.0 / latency_ms):,} predictions/sec")
 
-    if all_y_true is not None:
-        cm = confusion_matrix(all_y_true, all_y_pred_rf)
-    else:
-        cm = confusion_matrix(y, clf_final.predict(X_full))
+    class_ids = np.arange(len(le.classes_))
+    cm = confusion_matrix(all_y_true, all_y_pred_rf, labels=class_ids)
 
     disp = ConfusionMatrixDisplay(cm, display_labels=le.classes_)
     disp.plot(cmap="Blues")
-    plt.title("LOSO-CV Confusion Matrix (Random Forest)")
+    plt.title("Grouped LOSO-CV Confusion Matrix (Random Forest)")
     plt.tight_layout()
     plt.savefig("confusion_matrix.png", dpi=150)
     plt.close()
