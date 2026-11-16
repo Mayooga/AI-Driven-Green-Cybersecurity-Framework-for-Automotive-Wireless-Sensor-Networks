@@ -128,5 +128,26 @@ Terminal 2: launch the dashboard:
 streamlit run dashboard.py
 ```
 
-The gateway reads receiver records, computes features, predicts a class, and updates `latest_prediction.json`. The dashboard reads that file and displays the latest class, confidence, packet count, and telemetry. Stop either process with **Ctrl+C**. `latest_prediction.json` is generated while running and is intentionally excluded from Git.
+The gateway reads receiver records, computes features, predicts a class, and updates `latest_prediction.json`. In addition to the model output, the file includes an energy profile for the current packet: estimated total energy consumed, energy per packet, security mode, and remaining energy budget. The dashboard reads this data and displays the latest class, confidence, packet count, telemetry, and energy-aware operation state. Stop either process with **Ctrl+C**. `latest_prediction.json` is generated while running and is intentionally excluded from Git.
+
+## Compare sender power modes without a power meter
+
+This separate experiment records sender awake/sleep duty-cycle data and receiver packet counts. It does not measure electrical energy, and its files stay in `green_data/` rather than the attack-training `data/` folder.
+
+1. In `firmware/sender/sender.ino`, set `POWER_MODE` to `MODE_ALWAYS_ON`, `MODE_SLEEP`, or `MODE_ADAPTIVE`, then upload the sketch. Use the sender's normal traffic mode (`N`).
+2. Open the sender's Serial Monitor at 115200 baud and the receiver on its own USB serial port. Do not have two programs open on the same COM port.
+3. From the project root, run one 10-minute trial (replace `COM5` with the receiver port):
+
+   ```powershell
+   python green_capture.py COM5 always_on 1 600
+   ```
+
+   When the script says to start the sender, start or reset it in normal mode. At the end, enter the latest sender `# STATS` values for `packets`, `awake_ms`, and `sleep_ms`. Repeat with run numbers 2 and 3, then repeat all three trials for `sleep` and `adaptive`. Keep setup and duration consistent.
+4. Summarize the runs:
+
+   ```powershell
+   python compare_green.py
+   ```
+
+Per-packet receiver logs and the run summary are saved in `green_data/`. `sleep_time_pct` is the share of accounted time spent sleeping; compare it alongside receiver packet counts. It is a duty-cycle proxy only, not Wh, joules, or measured energy savings. Avoid running `clean_data.py` on `green_data/`; this experiment is separate from attack-classifier training.
 

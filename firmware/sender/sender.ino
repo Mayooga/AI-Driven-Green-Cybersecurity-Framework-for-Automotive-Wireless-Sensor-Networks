@@ -20,19 +20,19 @@
 #include "esp_sleep.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
-#include "secrets.h"          // aesKey[16]
+#include "secrets.h"  // aesKey[16]
 #include "sensor_payload.h"
 
 // ─── CONFIG ──────────────────────────────────────────────
 #define MODE_ALWAYS_ON 0
-#define MODE_SLEEP     1
-#define MODE_ADAPTIVE  2
-#define POWER_MODE     MODE_ADAPTIVE
+#define MODE_SLEEP 1
+#define MODE_ADAPTIVE 2
+#define POWER_MODE MODE_ADAPTIVE
 
 const int ACS712_PIN = 34;
-const int PIR_PIN    = 27;
+const int PIR_PIN = 27;
 const int ATTACK_NORMAL = 0;
-const int ATTACK_FLOOD  = 1;
+const int ATTACK_FLOOD = 1;
 const int ATTACK_REPLAY = 2;
 const int ATTACK_TAMPER = 3;
 const uint32_t FLOOD_INTERVAL_MS = 1;
@@ -41,11 +41,11 @@ const uint32_t TAMPER_INTERVAL_MS = 500;
 
 const uint32_t FAST_INTERVAL_MS = 1000;
 const uint32_t SLOW_INTERVAL_MS = 10000;
-const int      STABLE_CYCLES    = 5;
+const int STABLE_CYCLES = 5;
 
-const int CUR_THR  = 30;
+const int CUR_THR = 30;
 const int TEMP_THR = 50;
-const int HUM_THR  = 300;
+const int HUM_THR = 300;
 
 // ─── STATE ───────────────────────────────────────────────
 mbedtls_gcm_context gcm;
@@ -97,16 +97,10 @@ bool reserveSequenceBlock() {
   return true;
 }
 
-// ESP-NOW send callback signature changed in Arduino-ESP32 core 3.x.
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-void onSent(const wifi_tx_info_t *txInfo, esp_now_send_status_t status) {
-  txDone = true;
-}
-#else
+// The installed Arduino-ESP32 core expects the MAC-address callback form.
 void onSent(const uint8_t *mac, esp_now_send_status_t status) {
   txDone = true;
 }
-#endif
 
 bool radioOn() {
   WiFi.mode(WIFI_STA);
@@ -134,7 +128,7 @@ int readCurrentAvg() {
 void sleepFor(uint32_t ms) {
   Serial.flush();
   esp_now_deinit();
-  WiFi.mode(WIFI_OFF);                       // radio off during sleep
+  WiFi.mode(WIFI_OFF);  // radio off during sleep
 
   esp_sleep_enable_timer_wakeup((uint64_t)ms * 1000ULL);
   int pirNow = digitalRead(PIR_PIN);
@@ -178,17 +172,16 @@ bool handleSerialCommands() {
     if (command == 'F') selectedMode = ATTACK_FLOOD;
     if (command == 'R') selectedMode = ATTACK_REPLAY;
     if (command == 'T') selectedMode = ATTACK_TAMPER;
-    if (selectedMode < 0) continue; // ignore line endings and wake prefix
+    if (selectedMode < 0) continue;  // ignore line endings and wake prefix
 
-    if ((selectedMode == ATTACK_REPLAY || selectedMode == ATTACK_TAMPER) &&
-        !haveLastGoodPacket) {
+    if ((selectedMode == ATTACK_REPLAY || selectedMode == ATTACK_TAMPER) && !haveLastGoodPacket) {
       Serial.println("# ERROR: let one normal packet arrive before replay/tamper");
       continue;
     }
 
     if (selectedMode == ATTACK_REPLAY) resetReplayCursor();
     attackMode = selectedMode;
-    const char *names[] = {"NORMAL", "FLOOD", "REPLAY", "TAMPER"};
+    const char *names[] = { "NORMAL", "FLOOD", "REPLAY", "TAMPER" };
     Serial.printf("# DEMO MODE: %s\n", names[attackMode]);
     commandHandled = true;
   }
@@ -283,25 +276,25 @@ void loop() {
     delay(1000);
     return;
   }
-  p.seq         = seqCounter++;
+  p.seq = seqCounter++;
   seqRemaining--;
   p.current_raw = (uint16_t)readCurrentAvg();
-  p.temp_x100   = bmeOk ? (int16_t)(bme.readTemperature() * 100.0f) : 0;
-  p.hum_x100    = bmeOk ? (uint16_t)(bme.readHumidity() * 100.0f)   : 0;
-  p.press_x10   = bmeOk ? (uint16_t)(bme.readPressure() / 10.0f)    : 0;
-  p.pir         = digitalRead(PIR_PIN) ? 1 : 0;
+  p.temp_x100 = bmeOk ? (int16_t)(bme.readTemperature() * 100.0f) : 0;
+  p.hum_x100 = bmeOk ? (uint16_t)(bme.readHumidity() * 100.0f) : 0;
+  p.press_x10 = bmeOk ? (uint16_t)(bme.readPressure() / 10.0f) : 0;
+  p.pir = digitalRead(PIR_PIN) ? 1 : 0;
 
   // 2. DECIDE interval
   uint32_t interval = FAST_INTERVAL_MS;
 #if POWER_MODE == MODE_ADAPTIVE
-  bool changed = abs((int)p.current_raw - lastCur) > CUR_THR ||
-                 abs((int)p.temp_x100   - lastTemp) > TEMP_THR ||
-                 abs((int)p.hum_x100    - lastHum) > HUM_THR ||
-                 p.pir != lastPir || p.pir == 1;
+  bool changed = abs((int)p.current_raw - lastCur) > CUR_THR || abs((int)p.temp_x100 - lastTemp) > TEMP_THR || abs((int)p.hum_x100 - lastHum) > HUM_THR || p.pir != lastPir || p.pir == 1;
   stableCount = changed ? 0 : stableCount + 1;
   if (stableCount >= STABLE_CYCLES) interval = SLOW_INTERVAL_MS;
 #endif
-  lastCur = p.current_raw; lastTemp = p.temp_x100; lastHum = p.hum_x100; lastPir = p.pir;
+  lastCur = p.current_raw;
+  lastTemp = p.temp_x100;
+  lastHum = p.hum_x100;
+  lastPir = p.pir;
 
   // 3. ENCRYPT
   uint8_t iv[12];
@@ -310,7 +303,7 @@ void loop() {
   uint8_t tag[16];
   uint32_t te = micros();
   mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, PAYLOAD_LEN, iv, 12, NULL, 0,
-                            (const uint8_t*)&p, ciphertext, 16, tag);
+                            (const uint8_t *)&p, ciphertext, 16, tag);
   statEncryptUs += micros() - te;
 
   // 4. PACK and SEND (wait for TX completion before sleeping)
@@ -326,7 +319,7 @@ void loop() {
 
   txDone = false;
   esp_now_send(receiverMac, packet, sizeof(packet));
-  if (statPackets == 5) {   // print once, a few cycles in
+  if (statPackets == 5) {  // print once, a few cycles in
     Serial.print("CAPTURED: ");
     for (int i = 0; i < sizeof(packet); i++) Serial.printf("%02X", packet[i]);
     Serial.println();

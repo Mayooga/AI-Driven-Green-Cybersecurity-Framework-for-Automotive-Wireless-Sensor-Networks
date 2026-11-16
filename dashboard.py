@@ -5,6 +5,7 @@ dashboard.py - Real-Time Streamlit IDS Monitoring Dashboard
 import json
 import time
 from pathlib import Path
+import pandas as pd
 import streamlit as st
 
 try:
@@ -13,17 +14,43 @@ except ImportError:
     serial = None
 
 st.set_page_config(
-    page_title="IoT Edge IDS Monitor",
+    page_title="Green Cybersecurity Framework",
     page_icon="🛡️",
     layout="wide"
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 JSON_PATH = BASE_DIR / "latest_prediction.json"
+GREEN_DIR = BASE_DIR / "green_data"
+RUNS_PATH = GREEN_DIR / "runs.csv"
 BAUD_RATE = 115200
 
-st.title("🛡️ IoT Edge Intrusion Detection System")
-st.caption("Live edge telemetry monitoring with AES-128-GCM + Random Forest IDS")
+st.markdown("""
+<style>
+    .stApp, [data-testid="stAppViewContainer"] { background: #070b09; color: #e5f2e9; }
+    [data-testid="stHeader"] { background: rgba(7,11,9,.96); }
+    [data-testid="stSidebar"] { background: #0b110e; border-right: 1px solid #193526; }
+    h1, h2, h3, p, label, [data-testid="stMarkdownContainer"] { color: #e5f2e9; }
+    [data-testid="stMetric"] { background: #101813; border: 1px solid #21452e;
+        padding: 14px 16px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.22); }
+    [data-testid="stMetricLabel"] { color: #9bb8a3; }
+    [data-testid="stMetricValue"] { color: #63e68a; }
+    [data-testid="stDataFrame"], [data-testid="stTable"] { background: #101813; border: 1px solid #21452e; border-radius: 10px; }
+    [data-testid="stAlert"] { background: #101813; border: 1px solid #21452e; color: #e5f2e9; }
+    [data-baseweb="input"] > div, [data-baseweb="select"] > div, textarea {
+        background: #101813; color: #e5f2e9; border-color: #31583b; }
+    .stButton > button { background: #39c96a; color: #061009; border: 1px solid #55e681; border-radius: 9px; font-weight: 700; }
+    .stButton > button:hover { background: #62e68a; color: #061009; border-color: #8af0a7; }
+    hr { border-color: #20372a; }
+    .hero { padding: 24px 28px; border-radius: 16px; color: white;
+        background: linear-gradient(115deg,#050806,#0c2817 58%,#174b2a); border: 1px solid #28663a; margin: 0 0 18px 0; }
+    .hero h1 { color: #76f39a; margin: 0; font-size: 2rem; }
+    .hero p { color: #c5e8ce; margin: 8px 0 0 0; font-size: 1rem; }
+    .section-note { color: #91b69b; font-size: .9rem; }
+</style>
+<div class="hero"><h1>AI-Driven Green Cybersecurity Framework</h1>
+<p>Automotive wireless sensor networks · Encrypted telemetry · Machine-learning intrusion detection · Energy-aware operation</p></div>
+""", unsafe_allow_html=True)
 
 # Initialize persistent session counters
 if "counts" not in st.session_state:
@@ -163,6 +190,10 @@ def render_live_panel():
 
     st.caption(f"Packet #{packet_id} | Time: {updated_at} | Sensor Reading: `{raw_val}`")
     st.divider()
+    st.subheader("Energy-aware design")
+    st.info("The sender supports always-on, fixed-sleep, and adaptive sampling. Gateway energy figures are software estimates; use the Green Mode Experiment below for packet and sleep-duty comparisons.")
+
+    st.divider()
     st.subheader("Live Packet Counters")
     c_tot, c_norm, c_fld, c_rep, c_tmp = st.columns(5)
     c_tot.metric("Total Packets", total_packets)
@@ -185,3 +216,81 @@ fragment = getattr(st, "fragment", None)
 if fragment is not None:
     render_live_panel = fragment(run_every=0.5)(render_live_panel)
 render_live_panel()
+
+
+def render_green_panel():
+    st.divider()
+    st.subheader("Green mode experiment")
+    st.markdown('<p class="section-note">Live capture and mode comparison · Duty-cycle proxy, not electrical energy measurement</p>', unsafe_allow_html=True)
+
+    summary = pd.DataFrame()
+    if RUNS_PATH.exists():
+        try:
+            summary = pd.read_csv(RUNS_PATH)
+        except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+            summary = pd.DataFrame()
+
+    packet_files = sorted(GREEN_DIR.glob("*_packets.csv"), key=lambda path: path.stat().st_mtime, reverse=True) if GREEN_DIR.exists() else []
+    live_df, live_file = pd.DataFrame(), None
+    if packet_files:
+        live_file = packet_files[0]
+        try:
+            live_df = pd.read_csv(live_file)
+        except (OSError, pd.errors.ParserError, pd.errors.EmptyDataError):
+            live_df = pd.DataFrame()
+
+    modes = ["always_on", "sleep", "adaptive"]
+    valid = pd.DataFrame()
+    if not summary.empty and {"mode", "receiver_records"}.issubset(summary.columns):
+        valid = summary[pd.to_numeric(summary["receiver_records"], errors="coerce").fillna(0) > 0].copy()
+    counts = valid["mode"].value_counts() if not valid.empty else pd.Series(dtype=int)
+    cols = st.columns(3)
+    for col, mode in zip(cols, modes):
+        col.metric(mode.replace("_", " ").title() + " valid trials", int(counts.get(mode, 0)))
+
+    if live_file is not None:
+        mode_label = live_file.name.split("_run", 1)[0].replace("_", " ").title()
+        auth_col = pd.to_numeric(live_df["auth_ok"], errors="coerce") if not live_df.empty and "auth_ok" in live_df else pd.Series(dtype=float)
+        last_seq = live_df["seq"].iloc[-1] if not live_df.empty and "seq" in live_df else "—"
+        a, b, c, d = st.columns(4)
+        a.metric("Latest capture", mode_label)
+        b.metric("Packets received", len(live_df))
+        c.metric("Authenticated", int((auth_col == 1).sum()))
+        d.metric("Latest sequence", last_seq)
+        st.caption(f"Live packet file: `{live_file.name}` · Refreshes automatically during capture.")
+    else:
+        st.caption("No green-mode packet file found yet. Start a run with `green_capture.py` to see live results.")
+
+    required = {"mode", "sleep_time_pct", "receiver_records_per_s", "authenticated_records", "rejected_records"}
+    if not valid.empty and required.issubset(valid.columns):
+        for name in ["sleep_time_pct", "receiver_records_per_s", "authenticated_records", "rejected_records"]:
+            valid[name] = pd.to_numeric(valid[name], errors="coerce")
+        averages = valid.groupby("mode", as_index=False).agg(
+            trials=("mode", "count"),
+            sleep_share_pct=("sleep_time_pct", "mean"),
+            received_per_sec=("receiver_records_per_s", "mean"),
+            authenticated=("authenticated_records", "mean"),
+            rejected=("rejected_records", "mean"),
+        )
+        st.markdown("**Completed trial averages**")
+        shown = averages.rename(columns={
+            "mode": "Power mode", "trials": "Valid trials",
+            "sleep_share_pct": "Sleep-time share (%)",
+            "received_per_sec": "Received packets / sec",
+            "authenticated": "Authenticated / run",
+            "rejected": "Rejected / run",
+        }).round(2)
+        st.dataframe(shown, hide_index=True, use_container_width=True)
+        st.bar_chart(averages.set_index("mode")["sleep_share_pct"])
+        with st.expander("Run-by-run details"):
+            detail_cols = [name for name in ["mode", "run", "actual_duration_s", "sender_packets_reported", "sender_awake_ms", "sender_sleep_ms", "sleep_time_pct", "receiver_records", "authenticated_records", "rejected_records"] if name in valid.columns]
+            st.dataframe(valid[detail_cols], hide_index=True, use_container_width=True)
+    elif not valid.empty:
+        st.warning("The run summary is missing fields expected by this dashboard. Check that the current green_capture.py created it.")
+    else:
+        st.info("Completed trials will appear here after a capture finishes and sender stats are entered. Empty receiver captures are excluded.")
+
+
+if fragment is not None:
+    render_green_panel = fragment(run_every=2.0)(render_green_panel)
+render_green_panel()

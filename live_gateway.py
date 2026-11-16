@@ -37,6 +37,16 @@ OUTPUT_JSON     = BASE_DIR / "latest_prediction.json"
 BAUD_RATE       = 115200
 WINDOW_SIZE     = 20
 NORMAL_IMPUTE   = 2580.0
+
+# Energy-aware mode: these values are a lightweight prototype estimate used to
+# explain the framework's green design. They are not hardware-calibrated power
+# measurements and should be treated as an operational estimate for the gateway.
+BASE_TX_UJ      = 40.0
+BYTE_TX_UJ      = 0.25
+ML_INFER_UJ     = 12.0
+DEFENSE_UJ      = 18.0
+SLEEP_LOW_POWER = 0.55
+THREAT_BUDGET_J = 12.0
 # ─────────────────────────────────────────────────────────────────────────
 
 # Feature order MUST match train_model.py exactly
@@ -166,6 +176,45 @@ def parse_serial_line(line: str):
         return None
 
 
+class EnergyAwareSecurityState:
+    """Prototype energy model for a low-power, adaptive security policy."""
+
+    def __init__(self):
+        self.total_energy_j = 0.0
+        self.packet_count = 0
+        self.energy_budget_j = THREAT_BUDGET_J
+
+    def estimate_packet_energy(self, packet_size: float, pred_label: str, is_attack: bool, confidence: float):
+        # Transmission cost scales with packet size; defensive modes increase the
+        # security cost slightly, while normal traffic keeps the footprint lower.
+        energy_uj = BASE_TX_UJ + (packet_size * BYTE_TX_UJ)
+        energy_uj += ML_INFER_UJ
+        if is_attack or pred_label != "normal":
+            energy_uj += DEFENSE_UJ + (confidence * 6.0)
+        else:
+            energy_uj += 3.0
+
+        # If the node is under low-power budget, reduce extra monitoring cost to
+        # stay closer to the sustainability objective.
+        if self.total_energy_j >= self.energy_budget_j * 0.75:
+            energy_uj *= SLEEP_LOW_POWER
+
+        return energy_uj / 1_000_000.0  # Joules
+
+    def record(self, packet_size: float, pred_label: str, is_attack: bool, confidence: float):
+        self.packet_count += 1
+        energy_j = self.estimate_packet_energy(packet_size, pred_label, is_attack, confidence)
+        self.total_energy_j += energy_j
+        avg = self.total_energy_j / max(self.packet_count, 1)
+
+        return {
+            "total_energy_j": round(self.total_energy_j, 6),
+            "energy_per_packet_j": round(avg, 6),
+            "security_mode": "adaptive-defense" if is_attack or pred_label != "normal" else "low-power-monitoring",
+            "energy_budget_remaining_pct": round(max(0.0, 100.0 * (1.0 - (self.total_energy_j / self.energy_budget_j))), 2),
+        }
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python live_gateway.py <PORT>")
@@ -175,6 +224,7 @@ def main():
     port = sys.argv[1]
     clf, le = load_model()
     buffer = CausalFeatureBuffer()
+    energy_state = EnergyAwareSecurityState()
 
     print(f"\nOpening {port} at {BAUD_RATE} baud...")
     ser = serial.Serial(port, BAUD_RATE, timeout=1)
@@ -213,6 +263,8 @@ def main():
                 for cls_name, p in zip(le.classes_, proba)
             }
 
+            energy_profile = energy_state.record(float(pkt_size), pred_label, pred_label != "normal", float(confidence) / 100.0)
+
             record = {
                 "packet_count" : packet_count,
                 "timestamp_ms" : timestamp,
@@ -222,6 +274,7 @@ def main():
                 "is_attack"    : (pred_label != "normal"),
                 "probabilities": prob_dict,
                 "features"     : {k: round(v, 3) for k, v in feats.items()},
+                "energy_profile": energy_profile,
                 "updated_at"   : time.strftime("%H:%M:%S"),
             }
 
