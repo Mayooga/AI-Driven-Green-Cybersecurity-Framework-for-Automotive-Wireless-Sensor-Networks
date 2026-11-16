@@ -3,7 +3,7 @@ live_gateway.py
 
 Real-Time Edge Gateway for IoT Intrusion Detection.
 
-Reads the ESP2 receiver's Serial line, computes all 10 features causally
+Reads the ESP2 receiver's Serial line, computes the trained features causally
 using a rolling buffer, feeds the feature vector into 'model.joblib',
 and writes the live prediction to 'latest_prediction.json'.
 
@@ -15,13 +15,14 @@ Usage:
 import sys
 import json
 import time
-import re
 import math
 from collections import deque
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import joblib
+from model_features import FEATURES
 
 try:
     import serial
@@ -33,10 +34,9 @@ except ImportError:
 BASE_DIR        = Path(__file__).resolve().parent
 MODEL_PATH      = BASE_DIR / "model.joblib"
 ENCODER_PATH    = BASE_DIR / "label_encoder.joblib"
+MEDIANS_PATH    = BASE_DIR / "feature_medians.joblib"
 OUTPUT_JSON     = BASE_DIR / "latest_prediction.json"
 BAUD_RATE       = 115200
-WINDOW_SIZE     = 20
-NORMAL_IMPUTE   = 2580.0
 
 # Energy-aware mode: these values are a lightweight prototype estimate used to
 # explain the framework's green design. They are not hardware-calibrated power
@@ -49,130 +49,104 @@ SLEEP_LOW_POWER = 0.55
 THREAT_BUDGET_J = 12.0
 # ─────────────────────────────────────────────────────────────────────────
 
-# Feature order MUST match train_model.py exactly
-FEATURES = [
-    "inter_packet_ms",
-    "inter_packet_std_5",
-    "packets_per_sec",
-    "value",
-    "value_zscore",
-    "is_repeat_value",
-    "repeat_rate_5",
-    "replay_timing_sig",
-    "is_decrypt_fail",
-    "packet_size",
-]
-
-
 def load_model():
-    if not MODEL_PATH.exists() or not ENCODER_PATH.exists():
-        print(f"ERROR: {MODEL_PATH.name} or {ENCODER_PATH.name} missing. Run train_model.py first.")
+    required_paths = (MODEL_PATH, ENCODER_PATH, MEDIANS_PATH)
+    missing = [path.name for path in required_paths if not path.exists()]
+    if missing:
+        print(f"ERROR: Missing {', '.join(missing)}. Run train_model.py first.")
         sys.exit(1)
     clf = joblib.load(MODEL_PATH)
     le = joblib.load(ENCODER_PATH)
+    medians = joblib.load(MEDIANS_PATH)
+    model_features = getattr(clf, "feature_names_in_", None)
+    if model_features is not None and list(model_features) != FEATURES:
+        raise ValueError(
+            "The trained model feature columns do not match model_features.py. "
+            "Run train_model.py to rebuild the model artifacts."
+        )
+    feature_count = getattr(clf, "n_features_in_", len(FEATURES))
+    if feature_count != len(FEATURES) or list(medians.index) != FEATURES:
+        raise ValueError(
+            "The trained model and feature medians do not match model_features.py. "
+            "Run train_model.py to rebuild the model artifacts."
+        )
     print(f"Loaded trained ML model: {MODEL_PATH.name}")
-    return clf, le
+    return clf, le, medians
 
 
 class CausalFeatureBuffer:
-    """
-    Maintains a rolling window of recent packets and computes all features
-    causally (strictly looking at past packets, no future lookahead).
-    """
-    def __init__(self, window: int = WINDOW_SIZE, impute_value: float = NORMAL_IMPUTE):
-        self.timestamps       = deque(maxlen=window)
-        self.values           = deque(maxlen=window)
-        self.inter_packet_buf = deque(maxlen=window)
+    """Compute the same causal features used by clean_data.py."""
+
+    def __init__(self):
+        self.timestamps = deque()
+        self.values = deque(maxlen=10)
+        self.inter_packet_buf = deque(maxlen=5)
         self.repeat_buf       = deque(maxlen=5)
-        self.impute_value     = impute_value
 
-    def push(self, timestamp: int, packet_size: float, raw_value: str) -> dict:
-        # 1. is_decrypt_fail
-        is_fail = 1 if "DECRYPT_FAIL" in str(raw_value).upper() else 0
-        if is_fail:
-            value = np.nan
-        else:
-            try:
-                value = float(raw_value)
-            except ValueError:
-                value = np.nan
-
-        # 2. inter_packet_ms
-        if len(self.timestamps) > 0:
-            inter_ms = float(timestamp - self.timestamps[-1])
-        else:
-            inter_ms = 0.0
-
+    def push(self, timestamp: int, packet_size: float, raw_value: float | None) -> dict:
+        value = float(raw_value) if raw_value is not None else np.nan
+        inter_ms = float(timestamp - self.timestamps[-1]) if self.timestamps else 0.0
         self.timestamps.append(timestamp)
         self.inter_packet_buf.append(inter_ms)
 
-        # 3. inter_packet_std_5
-        if len(self.inter_packet_buf) >= 2:
-            inter_packet_std_5 = float(np.std(list(self.inter_packet_buf)[-5:]))
-        else:
-            inter_packet_std_5 = 0.0
+        while self.timestamps and timestamp - self.timestamps[0] > 1000:
+            self.timestamps.popleft()
+        packets_per_sec = len(self.timestamps)
+        inter_packet_std_5 = (
+            float(np.std(self.inter_packet_buf, ddof=1))
+            if len(self.inter_packet_buf) > 1 else 0.0
+        )
 
-        # 4. packets_per_sec (within last 1000ms)
-        ts_list = list(self.timestamps)
-        packets_per_sec = sum(1 for t in ts_list if timestamp - t <= 1000)
-
-        # 5. is_repeat_value
         prev_val = self.values[-1] if len(self.values) > 0 else np.nan
-        if is_fail:
-            is_repeat = 0
-        elif not np.isnan(value) and not np.isnan(prev_val) and value == prev_val:
-            is_repeat = 1
-        else:
-            is_repeat = 0
-
-        self.values.append(value if not np.isnan(value) else np.nan)
+        is_repeat = int(not np.isnan(value) and not np.isnan(prev_val) and value == prev_val)
+        self.values.append(value)
         self.repeat_buf.append(is_repeat)
-
-        # 6. repeat_rate_5
         repeat_rate_5 = float(np.mean(list(self.repeat_buf)))
-
-        # 7. replay_timing_sig
         replay_timing_sig = repeat_rate_5 * (1.0 + math.log1p(inter_packet_std_5))
 
-        # 8. value_zscore
-        valid_vals = [v for v in list(self.values) if not np.isnan(v)]
-        if len(valid_vals) >= 2:
-            roll_mean = float(np.mean(valid_vals[-10:]))
-            roll_std  = float(np.std(valid_vals[-10:]))
-            imputed   = value if not np.isnan(value) else roll_mean
-            value_zscore = (imputed - roll_mean) / roll_std if roll_std > 0 else 0.0
+        valid_vals = [v for v in self.values if not np.isnan(v)]
+        if not np.isnan(value) and len(valid_vals) > 1:
+            roll_mean = float(np.mean(valid_vals))
+            roll_std = float(np.std(valid_vals, ddof=1))
+            value_zscore = (value - roll_mean) / roll_std if roll_std > 0 else 0.0
         else:
             value_zscore = 0.0
-
-        # 9. Final numeric value for model input
-        feat_value = value if not np.isnan(value) else (
-            float(np.mean(valid_vals)) if valid_vals else self.impute_value
-        )
 
         return {
             "inter_packet_ms"   : inter_ms,
             "inter_packet_std_5": inter_packet_std_5,
             "packets_per_sec"   : packets_per_sec,
-            "value"             : feat_value,
+            "value"             : value,
             "value_zscore"      : value_zscore,
             "is_repeat_value"   : is_repeat,
             "repeat_rate_5"     : repeat_rate_5,
             "replay_timing_sig" : replay_timing_sig,
-            "is_decrypt_fail"   : is_fail,
             "packet_size"       : packet_size,
         }
 
 
-def parse_serial_line(line: str):
+def parse_serial_line(line: str) -> tuple[int, float, float | None] | None:
     parts = line.strip().split(",")
-    if len(parts) != 3:
+    if len(parts) == 3:
+        try:
+            timestamp = int(parts[0])
+            packet_size = float(parts[1])
+            raw_value = None if "DECRYPT_FAIL" in parts[2].upper() else float(parts[2])
+            return timestamp, packet_size, raw_value
+        except ValueError:
+            return None
+    if len(parts) not in (11, 12):
         return None
+
     try:
-        timestamp = int(re.search(r"\d+", parts[0]).group())
-        pkt_size  = float(re.search(r"\d+", parts[1]).group())
-        raw_val   = parts[2].strip()
-        return timestamp, pkt_size, raw_val
-    except (AttributeError, ValueError):
+        timestamp = int(parts[0])
+        auth_ok = int(parts[2])
+        packet_size = float(parts[3])
+        raw_value = float(parts[6]) if auth_ok == 1 else None
+        if auth_ok not in (0, 1):
+            return None
+        return timestamp, packet_size, raw_value
+    except ValueError:
         return None
 
 
@@ -222,7 +196,7 @@ def main():
         sys.exit(1)
 
     port = sys.argv[1]
-    clf, le = load_model()
+    clf, le, medians = load_model()
     buffer = CausalFeatureBuffer()
     energy_state = EnergyAwareSecurityState()
 
@@ -244,11 +218,10 @@ def main():
             if parsed is None:
                 continue
 
-            timestamp, pkt_size, raw_value = parsed
-            feats = buffer.push(timestamp, pkt_size, raw_value)
+            timestamp, packet_size, raw_value = parsed
+            feats = buffer.push(timestamp, packet_size, raw_value)
 
-            # Build feature array in exact order
-            X = np.array([[feats[f] for f in FEATURES]])
+            X = pd.DataFrame([feats], columns=FEATURES).fillna(medians)
 
             # ML Inference
             pred_idx   = clf.predict(X)[0]
@@ -263,7 +236,7 @@ def main():
                 for cls_name, p in zip(le.classes_, proba)
             }
 
-            energy_profile = energy_state.record(float(pkt_size), pred_label, pred_label != "normal", float(confidence) / 100.0)
+            energy_profile = energy_state.record(packet_size, pred_label, pred_label != "normal", float(confidence) / 100.0)
 
             record = {
                 "packet_count" : packet_count,
@@ -273,7 +246,10 @@ def main():
                 "confidence"   : round(confidence, 1),
                 "is_attack"    : (pred_label != "normal"),
                 "probabilities": prob_dict,
-                "features"     : {k: round(v, 3) for k, v in feats.items()},
+                "features"     : {
+                    k: round(float(v), 3) if np.isfinite(v) else None
+                    for k, v in feats.items()
+                },
                 "energy_profile": energy_profile,
                 "updated_at"   : time.strftime("%H:%M:%S"),
             }

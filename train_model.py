@@ -28,21 +28,11 @@ from sklearn.model_selection import LeaveOneGroupOut
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay, f1_score
 import joblib
 
+from model_features import FEATURES
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "combined_clean.csv"
 CANONICAL_CLASSES = {"normal", "flood", "replay", "tamper"}
-
-FEATURES = [
-    "inter_packet_ms",
-    "inter_packet_std_5",
-    "packets_per_sec",
-    "value",
-    "value_zscore",
-    "is_repeat_value",
-    "repeat_rate_5",
-    "replay_timing_sig",
-    "packet_size",
-]
 
 
 def impute_train_only(X_train: pd.DataFrame, X_test: pd.DataFrame):
