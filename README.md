@@ -1,6 +1,6 @@
 # AI-Driven Green Cybersecurity Framework for Automotive Wireless Sensor Networks
 
-This project is a prototype intrusion-detection system for automotive wireless sensor networks. ESP32 boards send encrypted sensor readings to a receiver, and a Python machine-learning model classifies traffic as normal, flood, replay, or tamper. A Streamlit dashboard displays live predictions and sensor data, and can send demo-mode commands to the sender.
+This project is a prototype intrusion-detection system for automotive wireless sensor networks. ESP32 boards send encrypted sensor readings to a receiver, and a Python machine-learning model classifies traffic as normal, flood, replay, or tamper. The Streamlit dashboard displays the latest detection status and security alerts. Attack modes are selected on the sender ESP32 using its F/R/T/N serial controls; the dashboard does not trigger attacks.
 
 ## Requirements
 
@@ -9,7 +9,7 @@ This project is a prototype intrusion-detection system for automotive wireless s
 - Arduino IDE with ESP32 board support and the Adafruit BME280 libraries
 - A USB connection from the receiver to your computer
 
-The sender's USB connection is also needed to use the dashboard's attack-mode controls. The trained model files are included in the repository.
+The sender's USB connection is used for its serial attack-mode controls. The receiver's USB connection provides telemetry to the gateway. The trained model files are included in the repository.
 
 ## Run the project
 
@@ -33,7 +33,7 @@ The sender's USB connection is also needed to use the dashboard's attack-mode co
    streamlit run dashboard.py
    ```
 
-   Open the local URL printed by Streamlit in your browser. To use the dashboard's sender controls, select the sender's serial port in the dashboard and close any other program using that port.
+   Open the local URL printed by Streamlit in your browser. The dashboard shows the current IDS status and recent alerts. Use the sender ESP32 serial interface to select F (flood), R (replay), T (tamper), or N (normal); the dashboard reports the resulting detections from the receiver gateway.
 
 ## Optional: train the model
 

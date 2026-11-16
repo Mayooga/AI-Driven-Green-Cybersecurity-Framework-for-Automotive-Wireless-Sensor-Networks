@@ -256,6 +256,7 @@ def main():
 
             # Maintain recent 30 history entries for dashboard graphs
             history.append({
+                "packet_count": packet_count,
                 "time": record["updated_at"],
                 "predicted": pred_label,
                 "inter_ms": feats["inter_packet_ms"],
