@@ -1,56 +1,57 @@
 # ESP32 IoT Intrusion Detection System
 
-This project sends sensor readings between two ESP32 boards using ESP-NOW. A receiver ESP32 decrypts the packets and sends a serial record to a computer. Python scripts collect labeled recordings, prepare features, train and evaluate a Random Forest classifier, and display live predictions in a Streamlit dashboard.
+An ESP32-based wireless sensor network prototype that encrypts sensor telemetry, monitors incoming traffic for intrusion patterns, and displays live predictions in a Streamlit dashboard. The sender transmits current, temperature, humidity, pressure, and motion readings over ESP-NOW. The receiver authenticates and decrypts packets, detects repeated sequence numbers, and forwards telemetry to a Python gateway for machine-learning inference.
 
-## Project flow
+## System overview
 
 ```text
-ESP32 sender + sensor -> ESP-NOW -> ESP32 receiver -> USB serial -> Python gateway -> dashboard
-                                                            |
-Recorded CSVs -> clean_data.py -> combined_clean.csv -> train_model.py -> model artifacts
+ACS712 + BME280 + PIR
+        │
+ESP32 sender ── encrypted ESP-NOW ──> ESP32 receiver ── USB serial ──> Python gateway
+    ▲                                                                  │
+    └──────── dashboard attack controls (USB serial)                    ├── latest_prediction.json
+                                                                       ▼
+                                                                  Streamlit dashboard
+
+Recorded serial captures ──> clean_data.py ──> combined_clean.csv ──> train_model.py
+                                                                    └── model + evaluation artifacts
 ```
+
+The sender supports normal, flood, replay, and tamper demonstration modes. The receiver accepts packets from its configured trusted sender, authenticates/decrypts them, rate-limits incoming traffic, and records replay status. Python uses packet timing and sensor-derived features to classify traffic as `normal`, `flood`, `replay`, or `tamper`.
 
 ## Hardware and firmware
 
-- Two ESP32 boards: one receiver and one sender.
-- An ACS712 current sensor connected to GPIO 34 on the sender (as wired in the sketches).
-- USB cables for programming and serial connection.
-- Arduino IDE with the ESP32 board support installed.
+- Two ESP32 boards: one configured as sender and one as receiver.
+- ACS712 current sensor: `OUT` to GPIO 34 (use a voltage divider if the module output can exceed the ESP32 ADC input range).
+- BME280: SDA to GPIO 21, SCL to GPIO 22, powered at 3.3 V.
+- PIR motion sensor: output to GPIO 27.
+- USB connection from the receiver to the computer; a second USB connection to the sender is needed for dashboard attack controls.
+- Arduino IDE with ESP32 board support, the Adafruit BME280 library, and its required sensor library installed.
 
-The receiver sketch is `firmware/decryption/decryption.ino`. Sender sketches are in `firmware/sender`, `firmware/flood_sender`, `firmware/replay_sender`, and `firmware/tamper_sender`.
+Firmware is in `firmware/sender` and `firmware/decryption`. The shared `sensor_payload.h` defines the encrypted payload: sequence number, current, temperature, humidity, pressure, and PIR state. Keep identical payload definitions on sender and receiver.
 
-### Local firmware settings
+### Configure local firmware settings
 
-The repository includes a `secrets.example.h` in each firmware sketch folder. Before compiling a sketch, copy that file to `secrets.h` in the **same folder**. For example, from the project root in PowerShell:
+The repository uses local `secrets.h` files for the AES key, ESP-NOW keys, and receiver MAC configuration. These files are excluded from Git. Configure the sender and receiver with matching keys and the correct peer MAC addresses before compiling. The receiver also has a trusted-sender MAC configured in its sketch; it must match the sender board. Do not commit real keys or device-specific secrets.
 
-```powershell
-Copy-Item firmware/decryption/secrets.example.h firmware/decryption/secrets.h
-Copy-Item firmware/sender/secrets.example.h firmware/sender/secrets.h
-```
+### Upload and connect
 
-Repeat the sender copy command for `flood_sender`, `replay_sender`, and `tamper_sender` when you use those sketches. Edit the local files with your receiver's MAC address and a shared 16-byte AES key. The sender and receiver must use the same AES key. The sender sketches also need the receiver MAC address. Keep `secrets.h` private; it is excluded by `.gitignore`. Do not upload it. The example headers contain dummy values and must be configured before use.
+1. Upload `firmware/decryption/decryption.ino` to the receiver and `firmware/sender/sender.ino` to the sender.
+2. Use the MAC addresses printed by the boards at startup to configure their peer settings, including the receiver's trusted-sender setting.
+3. Connect the receiver to the computer and note its serial port. Close Arduino IDE Serial Monitor before running a Python process that reads that port.
+4. Use **115200 baud** for receiver and sender serial connections.
 
-The key previously used in this project was a predictable demonstration value. Do not treat it as secure. If changing it, change it in the receiver and all sender local settings. This project demonstrates a prototype data path and is not a security-hardened product.
-
-### Upload firmware
-
-1. Open the receiver sketch in Arduino IDE, select the ESP32 board and receiver COM port, and upload it to the receiver board.
-2. Get the receiver's Wi-Fi station MAC address. The separate sketch in `mac_adress.ino/mac_adress.ino.ino` prints the board's MAC when run; use the receiver's MAC in each sender's local `secrets.h`.
-3. Open one sender sketch, select the sender board and COM port, and upload it to the sender board. Use `sender` for normal traffic, or the matching flood, replay, or tamper sketch for that experiment.
-4. Open the receiver's serial connection at **115200 baud** when collecting data or running live detection. Close Arduino IDE Serial Monitor before starting a Python program that reads that same port.
-
-The receiver emits comma-separated lines in this format:
+The receiver prints a header followed by comma-separated records with this schema:
 
 ```text
-timestamp_ms,packet_size,sensor_value
-timestamp_ms,packet_size,DECRYPT_FAIL
+t_ms,seq,auth_ok,len,rssi,iat_ms,current,temp,hum,press,pir,replay
 ```
 
-Startup/status messages are not data records and are skipped by the logger.
+Here, `t_ms` is receiver uptime in milliseconds; `seq` is the sender's packet sequence; `auth_ok` reports authentication/decryption success; `len` is the received packet length; `rssi` is received signal strength; `iat_ms` is the inter-arrival time; and `current`, `temp`, `hum`, `press`, and `pir` are the decoded sensor values. `replay` marks a repeated sequence number. Startup and diagnostic lines begin with `#` and are not capture records.
 
-## Python setup
+## Python environment
 
-Use Python 3.10 or newer. From the project root, create and activate a virtual environment, then install the dependencies:
+Use Python 3.10 or newer. From the project root:
 
 ```powershell
 py -m venv .venv
@@ -58,75 +59,76 @@ py -m venv .venv
 python -m pip install pandas numpy scikit-learn matplotlib joblib pyserial streamlit
 ```
 
-On macOS or Linux, activate the environment with `source .venv/bin/activate` instead. Find the receiver's serial port in Arduino IDE under **Tools > Port** (for example, `COM5` on Windows or `/dev/tty.usbserial-...` on macOS).
+On macOS or Linux, activate with `source .venv/bin/activate`. Find the receiver port in Arduino IDE under **Tools > Port** (for example, `COM5` on Windows or `/dev/ttyUSB0` on Linux).
 
-## Collect labeled recordings
+## Capture labeled data
 
-Collect one CSV per traffic class per independent run. Save the files inside `data/` and use these exact filename patterns because `clean_data.py` derives the label and run/session from the filename:
+`capture.py` reads receiver serial records and writes a CSV named with the label and capture timestamp in the project root. Its label argument is stored as the capture label. For example:
 
-```text
-normal_run1.csv
-flood_run1.csv
-replay_run1.csv
-tamper_run1.csv
-normal_run2.csv
-...
+```powershell
+python capture.py COM5 normal
 ```
 
-For each recording:
+Start the sender in the desired mode, capture a consistent period, and stop the script with **Ctrl+C**. Repeat for `normal`, `flood`, `replay`, and `tamper`, using multiple independent sessions. Rename/move each capture into `data/` using the cleaning pipeline's expected convention:
 
-1. Upload the receiver firmware and the sender sketch for the class being recorded.
-2. Start the sender and connect the receiver to the computer over USB.
-3. In a terminal at the project root, start the logger. Replace `COM5` with the receiver port and use the matching output filename:
+```text
+data/normal_run1.csv
+data/flood_run1.csv
+data/replay_run1.csv
+data/tamper_run1.csv
+```
 
-   ```powershell
-   python log_serial.py COM5 normal data/normal_run1.csv
-   ```
+Use a new run number for every independent capture, and keep the run scheme consistent across classes. Do not append separate sessions to one file. The filename supplies the target class and session identifier during cleaning; the `label` column is retained for auditing. Preserve the raw CSVs so preprocessing and model training can be reproduced.
 
-   For other classes, change `normal` to `flood`, `replay`, or `tamper`, and change the output file accordingly. The logger's label argument is recorded in the CSV, but the cleaning step uses the filename as the class label.
+The sender firmware supports serial commands `F`, `R`, `T`, and `N` for flood, replay, tamper, and normal modes. The dashboard can send these commands through the sender's USB serial port. For replay experiments, the sender repeats previously transmitted encrypted packets; receiver replay status is retained as an audit field and is not used as the model's target label.
 
-4. Let the experiment run for a consistent duration or number of packets. Press **Ctrl+C** to stop and save the recording.
-5. Repeat the experiment for each class and for multiple independent runs. Keep run numbers consistent across classes (`run1`, `run2`, `run3`, etc.) so evaluation can hold out a run/session at a time. Do not append a new run to an existing filename; use a new run number.
+## Clean data and train
 
-For replay, first run the legitimate sender briefly and capture one complete authenticated 39-byte packet from its `CAPTURED:` serial line. Paste those 78 hex characters into `firmware/attacker/attacker.ino` as `capturedHex`, flash the attacker sketch, and stop the legitimate sender while the attacker transmits. The attacker repeats the same authenticated ESP-NOW frame every 500 ms. The receiver should report `replay=1` after the first accepted copy; authentication should still succeed because a replay is an unchanged old packet. The checked-in hex string is only a placeholder and must match the receiver's configured key and payload format.
-
-Collect separate normal and replay recordings for each run (for example `data/normal_run1.csv` and `data/replay_run1.csv`), then repeat with a newly captured packet and a different run number. Gather several runs under different sensor conditions and vary replay cadence. The existing `replay_1794421908.csv` is only one long repeated-packet trace: every row has sequence 5 and identical sensor values, so it cannot establish generalization by itself. Do not split rows from that file randomly into training and test sets; hold out complete recording sessions. `clean_data.py` accepts the current receiver columns (`t_ms`, `seq`, `auth_ok`, `len`, `current`, etc.) and uses the receiver's authenticated duplicate-sequence flag to label replay events in mixed replay files.
-
-Raw CSVs in `data/` are the source recordings. Keep them so the cleaning and training results can be reproduced.
-
-## Clean data and train the model
-
-Run these commands from the project root after collecting the raw CSVs:
+Run from the project root after placing capture CSVs in `data/`:
 
 ```powershell
 python clean_data.py
 python train_model.py
 ```
 
-`clean_data.py` reads CSVs from `data/`, sanitizes the receiver output, calculates time-series features within each recording session, and writes `combined_clean.csv`.
+`clean_data.py` accepts the receiver's multi-sensor CSV schema, sanitizes timestamps and packet values, labels each row from its capture filename, and computes causal timing/repetition features per capture session. Failed authentication is identified from `auth_ok` and sensor values from those rows are left missing for fold-safe imputation. The cleaned rows are written to `combined_clean.csv`.
 
-`train_model.py` reads `combined_clean.csv`, evaluates a Random Forest using Leave-One-Session-Out cross-validation (and reports a Logistic Regression baseline), then trains the final Random Forest on all collected data. It writes:
+`train_model.py` trains a Random Forest classifier for the four traffic classes. It evaluates on grouped held-out data, keeping capture sessions separate for normal/flood/tamper and grouping replay rows by payload identity to avoid identical replay payloads crossing folds. Replay rows still originate from the available replay captures, so this grouping does not establish generalization to independently collected replay attacks. The final model is trained on all available cleaned data.
 
-- `model.joblib` and `label_encoder.joblib` for live inference.
-- `confusion_matrix.png` and `feature_importance.png` for model results.
+Generated artifacts:
 
-Keep the model and encoder from the same training run. The live gateway needs both files. The quality of evaluation depends on having multiple independent runs; with only one session, the script falls back to a single-session training path and does not provide a held-out session evaluation.
+- `model.joblib` and `label_encoder.joblib` for live inference (keep them from the same training run).
+- `feature_medians.joblib` for the final model's missing-value preprocessing.
+- `confusion_matrix.png` and `feature_importance.png` for evaluation and interpretation.
 
-## Run live detection and dashboard
+Evaluation quality depends on the number and diversity of independent captures. Grouped evaluation is most informative when each class has several sessions and sensor conditions vary between sessions.
 
-With the receiver and a sender running, and with `model.joblib` and `label_encoder.joblib` present, open two terminals at the project root. Close Arduino Serial Monitor first.
+## Run live monitoring
 
-Terminal 1: start the serial gateway with the receiver's port:
+With the receiver and sender running and the model artifacts present, use two terminals. Close Serial Monitor on the receiver port before starting the gateway.
+
+Terminal 1 — receiver serial gateway:
 
 ```powershell
 python live_gateway.py COM5
 ```
 
-Terminal 2: launch the dashboard:
+Terminal 2 — dashboard:
 
 ```powershell
 streamlit run dashboard.py
 ```
 
-The gateway reads receiver records, computes features, predicts a class, and updates `latest_prediction.json`. The dashboard reads that file and displays the latest class, confidence, packet count, and telemetry. Stop either process with **Ctrl+C**. `latest_prediction.json` is generated while running and is intentionally excluded from Git.
+The gateway reads receiver records, computes the live feature vector used by the trained model, predicts a traffic class, and updates `latest_prediction.json`. The dashboard reads that file to show the latest prediction, confidence, packet counters, and live telemetry. Connect the sender's serial port in the dashboard to use the flood, replay, tamper, and return-to-normal controls. Close Arduino Serial Monitor on the sender port while using those controls.
 
+Stop either process with **Ctrl+C**. `latest_prediction.json` is generated at runtime and is excluded from Git.
+
+## Repository files
+
+- `firmware/` — ESP32 sender and receiver sketches plus shared sensor payload definitions.
+- `data/` — labeled raw capture sessions.
+- `capture.py` — receiver serial capture utility.
+- `clean_data.py` — capture cleaning and feature engineering.
+- `train_model.py` — grouped evaluation and model training.
+- `live_gateway.py` — serial gateway and live inference.
+- `dashboard.py` — Streamlit telemetry dashboard and sender controls.
