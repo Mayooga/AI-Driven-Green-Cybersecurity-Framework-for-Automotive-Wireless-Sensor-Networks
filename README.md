@@ -1,48 +1,15 @@
 # AI-Driven Green Cybersecurity Framework for Automotive Wireless Sensor Networks
 
-This project is a prototype intrusion-detection system for a wireless sensor network built with two ESP32 boards. The sender collects current, environmental, and motion readings and transmits them over ESP-NOW. The receiver authenticates/decrypts packets, checks sender identity and sequence numbers, and sends packet records to a host computer over USB serial. A Python Random Forest model classifies traffic as `normal`, `flood`, `replay`, or `tamper`. A Streamlit dashboard shows predictions and green-mode trial information and can control sender demonstration modes.
+This project is a prototype intrusion-detection system for automotive wireless sensor networks. ESP32 boards send encrypted sensor readings to a receiver, and a Python machine-learning model classifies traffic as normal, flood, replay, or tamper. A Streamlit dashboard displays live predictions and sensor data, and can send demo-mode commands to the sender.
 
-The receiver-to-dashboard data path is:
+## Requirements
 
-```text
-Sensors → ESP32 sender → encrypted ESP-NOW → ESP32 receiver
-                                              │ USB serial
-                                              ▼
-                                      live_gateway.py
-                                              │
-                                              ▼
-                                   latest_prediction.json
-                                              │
-                                              ▼
-                                      dashboard.py
-```
+- Python 3.10 or newer
+- Two ESP32 boards and the sensors used by the firmware (ACS712, BME280, and PIR)
+- Arduino IDE with ESP32 board support and the Adafruit BME280 libraries
+- A USB connection from the receiver to your computer
 
-The dashboard does not read the receiver serial stream directly. The gateway owns the receiver COM port and writes `latest_prediction.json`; Streamlit reads that JSON file. The dashboard uses a separate sender COM port for attack-mode controls. The receiver port can be opened by only one program at a time, so close Arduino Serial Monitor before running the gateway or a capture tool on that port.
-
-## Project contents
-
-- `firmware/sender/` — sender sketch and shared sensor payload definition.
-- `firmware/decryption/` — receiver sketch and shared sensor payload definition.
-- `capture.py` — captures labeled receiver serial records to CSV.
-- `clean_data.py` — validates and preprocesses labeled captures and engineers causal features.
-- `model_features.py` — shared model feature order used by training and live inference.
-- `train_model.py` — grouped model evaluation, final model training, and artifact generation.
-- `live_gateway.py` — receiver serial parsing, live feature generation, prediction, and JSON output.
-- `dashboard.py` — live monitoring, sender controls, and green-mode trial display.
-- `green_capture.py` — records packet and sender duty-cycle data for green-mode trials.
-- `compare_green.py` — summarizes green-mode trials.
-- `data/` — attack-class training recordings, named by class and run.
-- `green_data/` — separate green-mode packet captures and trial summaries.
-
-## Hardware and wiring
-
-- Two ESP32 development boards compatible with ESP-NOW and the required GPIO/light-sleep features.
-- ACS712 current sensor: `OUT` to sender GPIO 34. The assembled prototype connects this output directly, without a voltage divider. The firmware records the raw ADC value; note the exact 5 A or 20 A module variant used because it does not convert ADC values into calibrated current.
-- BME280: SDA to GPIO 21, SCL to GPIO 22, and 3.3 V supply. The firmware checks I²C addresses `0x76` and `0x77`.
-- PIR sensor: output to GPIO 27; ensure its output voltage is safe for the ESP32 input.
-- USB data connection from the receiver to the host computer. A second USB connection from the sender is needed for dashboard controls and to read sender statistics during green-mode trials.
-
-The sender averages 16 ACS712 ADC samples. It reads BME280 temperature, humidity, and pressure and a binary PIR state. These readings and a 16-bit sequence number form the packed 11-byte sensor payload.
+The sender's USB connection is also needed to use the dashboard's attack-mode controls. The trained model files are included in the repository.
 
 ## Software requirements
 
@@ -118,33 +85,11 @@ Make sure the model artifacts exist in the project root: `model.joblib`, `label_
    streamlit run dashboard.py
    ```
 
-4. Open the local URL printed in the terminal. The dashboard will read the latest gateway state from `latest_prediction.json` and refresh its live panels.
-5. To use attack controls, connect the **sender's** COM port in the dashboard. Close Serial Monitor or any other program using that sender port. Use the buttons to select a mode and return to Normal after each experiment.
+   Open the local URL printed by Streamlit in your browser. To use the dashboard's sender controls, select the sender's serial port in the dashboard and close any other program using that port.
 
-The receiver COM port must remain available to the gateway while live monitoring is running. `green_capture.py` also needs the receiver port, so stop the gateway before starting a green-mode capture. `latest_prediction.json` is generated at runtime and is ignored by Git.
+## Optional: train the model
 
-## 4. Capture labeled model-training data
-
-The checked-in training captures are stored under `data/` and use one file per class/session. To collect an additional run:
-
-1. Connect the receiver to the computer and identify its COM port.
-2. Start the sender in the class you want to record. Use the dashboard's sender controls or a serial terminal on the sender port. Keep the receiver capture process and sender control on their separate ports.
-3. Close Arduino Serial Monitor on the **receiver** port. Start `capture.py` with the receiver COM port and class label. Example:
-
-   ```powershell
-   python capture.py COM5 normal
-   ```
-
-   Use `flood`, `replay`, or `tamper` for the other classes.
-4. Let the scenario run for the desired duration. Press **Ctrl+C** to end the capture; rows are flushed as they are written.
-5. `capture.py` writes a file named like `normal_<timestamp>.csv` in the project root. Move it into `data/` and rename it using the exact session pattern expected by cleaning, such as `normal_run6.csv`.
-6. Repeat for independent sessions. Use `normal_runN.csv`, `flood_runN.csv`, `replay_runN.csv`, and `tamper_runN.csv`; do not append a new session to an existing file or overwrite source captures.
-
-`clean_data.py` determines the label and session from each filename, not from the receiver's `replay` decision. The checked-in dataset currently has five files per class. More diverse independent sessions improve the value of held-out evaluation.
-
-## 5. Clean data and train the model
-
-Run these commands from the project root after adding or changing captures:
+The included model is ready for live monitoring. To train a new model, put labeled capture CSV files in `data/`, then run:
 
 ```powershell
 python clean_data.py
